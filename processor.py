@@ -28,6 +28,7 @@ def format_size(size_bytes: float) -> str:
 @dataclass
 class ProcessingSettings:
     """All adjustable image processing parameters."""
+    mode: str = 'upscale'       # 'upscale' or 'downscale'
     upscale_factor: int = 4
     blur_radius: float = 0.6
     sharpen_radius: float = 1.2
@@ -39,11 +40,16 @@ class ProcessingSettings:
     saturation: float = 1.0     # 1.0 = unchanged
     brightness: float = 1.0     # 1.0 = unchanged
     noise_reduction: int = 0    # 0 = off, median-filter strength for anti-aliasing
+    # Downscale-mode settings
+    downscale_target: float = 0.50   # target scale (0.10 – 1.00)
+    downscale_blur: float = 0.3      # pre-shrink blur
+    downscale_sharpen: int = 60      # post-shrink sharpen amount
     output_format: str = 'PNG'
     jpeg_quality: int = 95
 
     def copy(self) -> 'ProcessingSettings':
         return ProcessingSettings(
+            mode=self.mode,
             upscale_factor=self.upscale_factor,
             blur_radius=self.blur_radius,
             sharpen_radius=self.sharpen_radius,
@@ -55,6 +61,9 @@ class ProcessingSettings:
             saturation=self.saturation,
             brightness=self.brightness,
             noise_reduction=self.noise_reduction,
+            downscale_target=self.downscale_target,
+            downscale_blur=self.downscale_blur,
+            downscale_sharpen=self.downscale_sharpen,
             output_format=self.output_format,
             jpeg_quality=self.jpeg_quality,
         )
@@ -148,6 +157,14 @@ def process_image(img: Image.Image, settings: ProcessingSettings) -> Image.Image
     if img.mode != 'RGBA':
         img = img.convert('RGBA')
 
+    if settings.mode == 'downscale':
+        return _process_downscale(img, settings)
+    return _process_upscale(img, settings)
+
+
+def _process_upscale(img: Image.Image, settings: ProcessingSettings) -> Image.Image:
+    """Upscale pipeline."""
+
     # Pass 1: Upscale using Lanczos resampling
     if settings.upscale_factor > 1:
         new_w = img.width * settings.upscale_factor
@@ -204,16 +221,64 @@ def process_image(img: Image.Image, settings: ProcessingSettings) -> Image.Image
     return img
 
 
+def _process_downscale(img: Image.Image, settings: ProcessingSettings) -> Image.Image:
+    """Downscale pipeline — shrink images while preserving quality."""
+
+    # Pass 1: Pre-shrink blur to avoid aliasing
+    if settings.downscale_blur > 0:
+        img = img.filter(ImageFilter.GaussianBlur(radius=settings.downscale_blur))
+
+    # Pass 2: Downscale to target size
+    if settings.downscale_target < 1.0:
+        new_w = max(1, int(img.width * settings.downscale_target))
+        new_h = max(1, int(img.height * settings.downscale_target))
+        img = img.resize((new_w, new_h), Image.LANCZOS)
+
+    # Pass 3: Post-shrink sharpen to recover detail
+    if settings.downscale_sharpen > 0:
+        img = img.filter(ImageFilter.UnsharpMask(
+            radius=1.0,
+            percent=settings.downscale_sharpen,
+            threshold=2,
+        ))
+
+    # Shared enhancement passes
+    if settings.contrast != 1.0:
+        img = ImageEnhance.Contrast(img).enhance(settings.contrast)
+    if settings.saturation != 1.0:
+        img = ImageEnhance.Color(img).enhance(settings.saturation)
+    if settings.brightness != 1.0:
+        img = ImageEnhance.Brightness(img).enhance(settings.brightness)
+    if settings.noise_reduction > 0:
+        k = settings.noise_reduction * 2 + 1
+        img = img.filter(ImageFilter.MedianFilter(size=k))
+    if settings.edge_trim > 0 and img.mode == 'RGBA':
+        alpha = img.getchannel('A')
+        eroded = alpha
+        for _ in range(settings.edge_trim):
+            eroded = eroded.filter(ImageFilter.MinFilter(3))
+        img.putalpha(eroded)
+
+    return img
+
+
 def get_output_dimensions(
     width: int, height: int, settings: ProcessingSettings
 ) -> Tuple[int, int]:
     """Calculate the final output dimensions without processing."""
+    if settings.mode == 'downscale':
+        if settings.downscale_target < 1.0:
+            w = max(1, int(width * settings.downscale_target))
+            h = max(1, int(height * settings.downscale_target))
+        else:
+            w, h = width, height
+        return w, h
+
     w = width * settings.upscale_factor if settings.upscale_factor > 1 else width
     h = height * settings.upscale_factor if settings.upscale_factor > 1 else height
     if settings.downscale_factor < 1.0:
         w = max(1, int(w * settings.downscale_factor))
         h = max(1, int(h * settings.downscale_factor))
-    # edge_trim erodes alpha but doesn't change image dimensions
     return w, h
 
 

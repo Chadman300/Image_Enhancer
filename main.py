@@ -40,20 +40,36 @@ ctk.set_default_color_theme("blue")
 ACCENT = ("#3B8ED0", "#1F6AA5")
 DANGER = ("#D03B3B", "#A51F1F")
 
-# Quality presets: (upscale, blur, sharpen_r, sharpen_amt, sharpen_thr, downscale)
+# Quality presets — upscale mode
 PRESETS = {
-    "Low":    ProcessingSettings(upscale_factor=2, blur_radius=0.3, sharpen_radius=0.8,
+    "Low":    ProcessingSettings(mode="upscale", upscale_factor=2, blur_radius=0.3, sharpen_radius=0.8,
                                  sharpen_amount=60,  sharpen_threshold=3, downscale_factor=1.00,
                                  edge_trim=0, contrast=1.0, saturation=1.0, brightness=1.0, noise_reduction=0),
-    "Medium": ProcessingSettings(upscale_factor=4, blur_radius=0.6, sharpen_radius=1.2,
+    "Medium": ProcessingSettings(mode="upscale", upscale_factor=4, blur_radius=0.6, sharpen_radius=1.2,
                                  sharpen_amount=120, sharpen_threshold=2, downscale_factor=0.97,
                                  edge_trim=0, contrast=1.05, saturation=1.05, brightness=1.0, noise_reduction=0),
-    "High":   ProcessingSettings(upscale_factor=4, blur_radius=0.4, sharpen_radius=1.5,
+    "High":   ProcessingSettings(mode="upscale", upscale_factor=4, blur_radius=0.4, sharpen_radius=1.5,
                                  sharpen_amount=180, sharpen_threshold=1, downscale_factor=0.98,
                                  edge_trim=0, contrast=1.1, saturation=1.1, brightness=1.0, noise_reduction=1),
-    "Ultra":  ProcessingSettings(upscale_factor=8, blur_radius=0.5, sharpen_radius=2.0,
+    "Ultra":  ProcessingSettings(mode="upscale", upscale_factor=8, blur_radius=0.5, sharpen_radius=2.0,
                                  sharpen_amount=220, sharpen_threshold=1, downscale_factor=0.97,
                                  edge_trim=0, contrast=1.15, saturation=1.15, brightness=1.0, noise_reduction=1),
+}
+
+# Quality presets — downscale mode
+DOWNSCALE_PRESETS = {
+    "Light":  ProcessingSettings(mode="downscale", downscale_target=0.75, downscale_blur=0.2,
+                                 downscale_sharpen=40, contrast=1.0, saturation=1.0, brightness=1.0,
+                                 noise_reduction=0, edge_trim=0),
+    "Half":   ProcessingSettings(mode="downscale", downscale_target=0.50, downscale_blur=0.3,
+                                 downscale_sharpen=60, contrast=1.02, saturation=1.02, brightness=1.0,
+                                 noise_reduction=0, edge_trim=0),
+    "Quarter":ProcessingSettings(mode="downscale", downscale_target=0.25, downscale_blur=0.5,
+                                 downscale_sharpen=80, contrast=1.05, saturation=1.05, brightness=1.0,
+                                 noise_reduction=1, edge_trim=0),
+    "Tiny":   ProcessingSettings(mode="downscale", downscale_target=0.10, downscale_blur=0.8,
+                                 downscale_sharpen=100, contrast=1.1, saturation=1.1, brightness=1.0,
+                                 noise_reduction=1, edge_trim=0),
 }
 
 
@@ -314,21 +330,29 @@ class App(ctk.CTk):
     def _build_settings(self, parent):
         # Outer wrapper so the PanedWindow can manage it
         settings_wrapper = ctk.CTkFrame(parent, corner_radius=0)
-        settings_wrapper.configure(height=350)  # ensure it requests enough space
+        settings_wrapper.configure(height=350)
         settings_wrapper.grid_propagate(True)
         parent.add(settings_wrapper, weight=1)
         settings_wrapper.grid_rowconfigure(0, weight=1)
         settings_wrapper.grid_columnconfigure(0, weight=1)
 
-        # Scrollable container for all settings
-        sf = ctk.CTkScrollableFrame(settings_wrapper, label_text="Processing Settings")
-        sf.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
-        sf.grid_columnconfigure(1, weight=1)
+        # Tabview: Upscale | Downscale
+        self._settings_tabview = ctk.CTkTabview(settings_wrapper, height=300)
+        self._settings_tabview.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
 
-        # Preset selector row
-        preset_row = ctk.CTkFrame(sf, fg_color="transparent")
-        preset_row.grid(row=1, column=0, columnspan=4, padx=10, pady=(2, 6), sticky="ew")
+        up_tab = self._settings_tabview.add("Upscale")
+        dn_tab = self._settings_tabview.add("Downscale")
+        self._settings_tabview.set("Upscale")
+        self._settings_tabview.configure(command=self._on_tab_change)
 
+        # ── Upscale tab ──────────────────────────────────────────────
+        up_sf = ctk.CTkScrollableFrame(up_tab, fg_color="transparent")
+        up_sf.pack(fill="both", expand=True)
+        up_sf.grid_columnconfigure(1, weight=1)
+
+        # Preset selector
+        preset_row = ctk.CTkFrame(up_sf, fg_color="transparent")
+        preset_row.grid(row=0, column=0, columnspan=4, padx=10, pady=(2, 6), sticky="ew")
         ctk.CTkLabel(preset_row, text="Preset:", font=ctk.CTkFont(size=13)).pack(
             side="left", padx=(0, 8),
         )
@@ -339,8 +363,8 @@ class App(ctk.CTk):
         self.preset_menu.set("Custom")
         self.preset_menu.pack(side="left")
 
-        # (label, attr, from, to, default, step, format, type)
-        configs = [
+        # Upscale-specific sliders
+        upscale_configs = [
             ("Upscale Factor",    "upscale_factor",    1,    8,    4,    1,    "{}x",    int),
             ("Blur Radius",       "blur_radius",       0.0,  3.0,  0.6,  0.05, "{:.2f}", float),
             ("Sharpen Radius",    "sharpen_radius",    0.0,  5.0,  1.2,  0.1,  "{:.1f}", float),
@@ -354,24 +378,78 @@ class App(ctk.CTk):
             ("Edge Trim (px)",    "edge_trim",         0,    50,   0,    1,    "{}px",   int),
         ]
 
-        self._slider_configs = configs
+        # ── Downscale tab ────────────────────────────────────────────
+        dn_sf = ctk.CTkScrollableFrame(dn_tab, fg_color="transparent")
+        dn_sf.pack(fill="both", expand=True)
+        dn_sf.grid_columnconfigure(1, weight=1)
+
+        # Preset selector for downscale
+        dn_preset_row = ctk.CTkFrame(dn_sf, fg_color="transparent")
+        dn_preset_row.grid(row=0, column=0, columnspan=4, padx=10, pady=(2, 6), sticky="ew")
+        ctk.CTkLabel(dn_preset_row, text="Preset:", font=ctk.CTkFont(size=13)).pack(
+            side="left", padx=(0, 8),
+        )
+        self.dn_preset_menu = ctk.CTkComboBox(
+            dn_preset_row, values=["Custom", "Light", "Half", "Quarter", "Tiny"],
+            width=120, state="readonly", command=self._on_dn_preset_change,
+        )
+        self.dn_preset_menu.set("Custom")
+        self.dn_preset_menu.pack(side="left")
+
+        # Downscale-specific sliders
+        downscale_configs = [
+            ("Scale To",          "downscale_target",  0.10, 1.00, 0.50, 0.05, "{:.0%}", float),
+            ("Pre-Blur",          "downscale_blur",    0.0,  3.0,  0.3,  0.05, "{:.2f}", float),
+            ("Sharpen Amount",    "downscale_sharpen", 0,    300,  60,   5,    "{}%",    int),
+            ("Contrast",          "contrast",          0.50, 2.00, 1.0,  0.05, "{:.2f}", float),
+            ("Saturation",        "saturation",        0.00, 2.00, 1.0,  0.05, "{:.2f}", float),
+            ("Brightness",        "brightness",        0.50, 2.00, 1.0,  0.05, "{:.2f}", float),
+            ("Noise Reduction",   "noise_reduction",   0,    5,    0,    1,    "{}",     int),
+            ("Edge Trim (px)",    "edge_trim",         0,    50,   0,    1,    "{}px",   int),
+        ]
+
+        # Build all sliders for both tabs
+        all_configs = upscale_configs + downscale_configs
+        self._slider_configs = all_configs  # used by _apply_settings_to_ui
+        self._upscale_configs = upscale_configs
+        self._downscale_configs = downscale_configs
         self._slider_refs: dict = {}
         self._slider_val_labels: dict = {}
 
-        for i, (label, attr, lo, hi, default, step, fmt, vtype) in enumerate(configs, start=2):
-            ctk.CTkLabel(sf, text=label, font=ctk.CTkFont(size=12)).grid(
+        self._populate_sliders(up_sf, upscale_configs, start_row=1)
+        self._populate_sliders(dn_sf, downscale_configs, start_row=1)
+
+        # Reset buttons
+        reset_row_up = len(upscale_configs) + 1
+        ctk.CTkButton(
+            up_sf, text="Reset to Defaults", height=26,
+            fg_color=("gray75", "gray30"), hover_color=("gray65", "gray40"),
+            font=ctk.CTkFont(size=12), command=self._reset_settings,
+        ).grid(row=reset_row_up, column=0, columnspan=4, padx=10, pady=(4, 6), sticky="ew")
+
+        reset_row_dn = len(downscale_configs) + 1
+        ctk.CTkButton(
+            dn_sf, text="Reset to Defaults", height=26,
+            fg_color=("gray75", "gray30"), hover_color=("gray65", "gray40"),
+            font=ctk.CTkFont(size=12), command=self._reset_settings,
+        ).grid(row=reset_row_dn, column=0, columnspan=4, padx=10, pady=(4, 6), sticky="ew")
+
+    def _populate_sliders(self, parent_frame, configs, start_row=1):
+        """Create slider rows inside a scrollable frame."""
+        for i, (label, attr, lo, hi, default, step, fmt, vtype) in enumerate(configs, start=start_row):
+            ctk.CTkLabel(parent_frame, text=label, font=ctk.CTkFont(size=12)).grid(
                 row=i, column=0, padx=(10, 6), pady=2, sticky="w",
             )
 
             val_label = ctk.CTkLabel(
-                sf, text=fmt.format(default), width=50,
+                parent_frame, text=fmt.format(default), width=50,
                 font=ctk.CTkFont(size=12, weight="bold"),
             )
             val_label.grid(row=i, column=2, padx=(2, 0), pady=2, sticky="e")
 
             n_steps = max(1, int(round((hi - lo) / step)))
             slider = ctk.CTkSlider(
-                sf, from_=lo, to=hi, number_of_steps=n_steps, height=14,
+                parent_frame, from_=lo, to=hi, number_of_steps=n_steps, height=14,
                 command=lambda v, a=attr, vl=val_label, f=fmt, s=step, t=vtype:
                     self._on_slider_change(v, a, vl, f, s, t),
             )
@@ -379,37 +457,33 @@ class App(ctk.CTk):
             slider.grid(row=i, column=1, padx=4, pady=2, sticky="ew")
 
             # +/- buttons
-            btn_frame = ctk.CTkFrame(sf, fg_color="transparent")
+            btn_frame = ctk.CTkFrame(parent_frame, fg_color="transparent")
             btn_frame.grid(row=i, column=3, padx=(2, 6), pady=2, sticky="e")
 
-            minus_btn = ctk.CTkButton(
+            ctk.CTkButton(
                 btn_frame, text="\u2212", width=22, height=22,
                 font=ctk.CTkFont(size=13, weight="bold"),
                 fg_color=("gray75", "gray30"), hover_color=("gray65", "gray40"),
                 corner_radius=4,
                 command=lambda a=attr, s=step, l=lo, h=hi: self._step_slider(a, -s, l, h),
-            )
-            minus_btn.pack(side="left", padx=(0, 2))
+            ).pack(side="left", padx=(0, 2))
 
-            plus_btn = ctk.CTkButton(
+            ctk.CTkButton(
                 btn_frame, text="+", width=22, height=22,
                 font=ctk.CTkFont(size=13, weight="bold"),
                 fg_color=("gray75", "gray30"), hover_color=("gray65", "gray40"),
                 corner_radius=4,
                 command=lambda a=attr, s=step, l=lo, h=hi: self._step_slider(a, s, l, h),
-            )
-            plus_btn.pack(side="left")
+            ).pack(side="left")
 
-            self._slider_refs[attr] = slider
-            self._slider_val_labels[attr] = (val_label, fmt, vtype)
-
-        # Reset to defaults button
-        reset_row = len(configs) + 2
-        ctk.CTkButton(
-            sf, text="Reset to Defaults", height=26,
-            fg_color=("gray75", "gray30"), hover_color=("gray65", "gray40"),
-            font=ctk.CTkFont(size=12), command=self._reset_settings,
-        ).grid(row=reset_row, column=0, columnspan=4, padx=10, pady=(4, 6), sticky="ew")
+            # For shared attrs (contrast, etc.) that appear in both tabs,
+            # the second tab's slider will overwrite the ref — that's fine,
+            # _apply_settings_to_ui updates both via _all_slider_widgets.
+            if attr not in self._slider_refs:
+                self._slider_refs[attr] = []
+                self._slider_val_labels[attr] = []
+            self._slider_refs[attr].append(slider)
+            self._slider_val_labels[attr].append((val_label, fmt, vtype))
 
     def _build_preview(self, parent):
         pf = ctk.CTkFrame(parent, corner_radius=0)
@@ -617,12 +691,35 @@ class App(ctk.CTk):
     # EVENT HANDLERS
     # ═══════════════════════════════════════════════════════════════════
 
+    def _on_tab_change(self):
+        """Called when the user switches between Upscale / Downscale tabs."""
+        tab = self._settings_tabview.get()
+        self.settings.mode = "downscale" if tab == "Downscale" else "upscale"
+        self._schedule_preview_update()
+
+    def _on_dn_preset_change(self, value):
+        """Apply a downscale preset or restore saved custom values."""
+        if value == "Custom":
+            self.settings = self._custom_settings.copy()
+            self._apply_settings_to_ui(self.settings)
+            self._schedule_preview_update()
+            return
+        if value not in DOWNSCALE_PRESETS:
+            return
+        self._custom_settings = self.settings.copy()
+        preset = DOWNSCALE_PRESETS[value].copy()
+        self.settings = preset
+        self._apply_settings_to_ui(preset)
+        self._schedule_preview_update()
+
     def _reset_settings(self):
         """Reset all sliders to their default values."""
-        defaults = ProcessingSettings()
+        mode = self.settings.mode
+        defaults = ProcessingSettings(mode=mode)
         self.settings = defaults
         self._apply_settings_to_ui(defaults)
         self.preset_menu.set("Custom")
+        self.dn_preset_menu.set("Custom")
 
         # Reset format and quality
         self.format_menu.set("PNG")
@@ -635,18 +732,15 @@ class App(ctk.CTk):
         self._schedule_preview_update()
 
     def _on_preset_change(self, value):
-        """Apply a quality preset, or restore saved custom values."""
+        """Apply an upscale quality preset, or restore saved custom values."""
         if value == "Custom":
-            # Restore the user's saved custom settings
             self.settings = self._custom_settings.copy()
             self._apply_settings_to_ui(self.settings)
             self._schedule_preview_update()
             return
         if value not in PRESETS:
             return
-        # Save current settings as custom before switching away
-        if self.preset_menu.get() != value:  # switching from something else
-            self._custom_settings = self.settings.copy()
+        self._custom_settings = self.settings.copy()
         preset = PRESETS[value].copy()
         self.settings = preset
         self._apply_settings_to_ui(preset)
@@ -654,11 +748,14 @@ class App(ctk.CTk):
 
     def _apply_settings_to_ui(self, s: ProcessingSettings):
         """Sync all slider widgets to match a ProcessingSettings object."""
-        for (_label, attr, _lo, _hi, _default, _step, fmt, vtype) in self._slider_configs:
-            val = getattr(s, attr)
-            self._slider_refs[attr].set(val)
-            val_label, _, _ = self._slider_val_labels[attr]
-            val_label.configure(text=fmt.format(val))
+        for attr, sliders in self._slider_refs.items():
+            val = getattr(s, attr, None)
+            if val is None:
+                continue
+            for slider in sliders:
+                slider.set(val)
+            for (val_label, fmt, vtype) in self._slider_val_labels[attr]:
+                val_label.configure(text=fmt.format(val))
 
     def _on_slider_change(self, value, attr, val_label, fmt, step, vtype):
         if vtype is int:
@@ -668,25 +765,37 @@ class App(ctk.CTk):
 
         val_label.configure(text=fmt.format(value))
         setattr(self.settings, attr, vtype(value))
-        self.preset_menu.set("Custom")  # manual slider change = custom
-        self._custom_settings = self.settings.copy()  # save custom values
+
+        # Sync duplicate sliders for shared attrs (contrast, saturation, etc.)
+        for slider in self._slider_refs.get(attr, []):
+            if abs(slider.get() - value) > 0.0001:
+                slider.set(value)
+        for (vl, f, _) in self._slider_val_labels.get(attr, []):
+            vl.configure(text=f.format(value))
+
+        self.preset_menu.set("Custom")
+        self.dn_preset_menu.set("Custom")
+        self._custom_settings = self.settings.copy()
         self._schedule_preview_update()
 
     def _step_slider(self, attr: str, delta: float, lo: float, hi: float):
         """Nudge a slider by one step (+/-)."""
-        slider = self._slider_refs[attr]
-        val_label, fmt, vtype = self._slider_val_labels[attr]
-        current = slider.get()
+        sliders = self._slider_refs[attr]
+        current = sliders[0].get()
         new_val = max(lo, min(hi, current + delta))
+        vtype = self._slider_val_labels[attr][0][2]
         if vtype is int:
             new_val = int(round(new_val))
         else:
             new_val = round(new_val, 4)
-        slider.set(new_val)
-        val_label.configure(text=fmt.format(new_val))
+        for slider in sliders:
+            slider.set(new_val)
+        for (vl, fmt, _) in self._slider_val_labels[attr]:
+            vl.configure(text=fmt.format(new_val))
         setattr(self.settings, attr, vtype(new_val))
         self.preset_menu.set("Custom")
-        self._custom_settings = self.settings.copy()  # save custom values
+        self.dn_preset_menu.set("Custom")
+        self._custom_settings = self.settings.copy()
         self._schedule_preview_update()
 
     def _on_format_change(self, value):
