@@ -7,7 +7,7 @@ import os
 import zipfile
 import tempfile
 from dataclasses import dataclass
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageEnhance
 from io import BytesIO
 from typing import List, Tuple, Set
 
@@ -35,6 +35,10 @@ class ProcessingSettings:
     sharpen_threshold: int = 2
     downscale_factor: float = 0.97
     edge_trim: int = 0          # pixels to crop from each edge
+    contrast: float = 1.0       # 1.0 = unchanged
+    saturation: float = 1.0     # 1.0 = unchanged
+    brightness: float = 1.0     # 1.0 = unchanged
+    noise_reduction: int = 0    # 0 = off, median-filter strength for anti-aliasing
     output_format: str = 'PNG'
     jpeg_quality: int = 95
 
@@ -47,6 +51,10 @@ class ProcessingSettings:
             sharpen_threshold=self.sharpen_threshold,
             downscale_factor=self.downscale_factor,
             edge_trim=self.edge_trim,
+            contrast=self.contrast,
+            saturation=self.saturation,
+            brightness=self.brightness,
+            noise_reduction=self.noise_reduction,
             output_format=self.output_format,
             jpeg_quality=self.jpeg_quality,
         )
@@ -90,7 +98,7 @@ def collect_images(paths: List[str]) -> Tuple[List[str], List[str]]:
             continue
 
         if os.path.isdir(path):
-            _scan_directory(path, images, seen)
+            _scan_directory(path, images, seen, temp_dirs)
 
         elif zipfile.is_zipfile(path):
             tmp = tempfile.mkdtemp(prefix="imgupscaler_")
@@ -98,7 +106,7 @@ def collect_images(paths: List[str]) -> Tuple[List[str], List[str]]:
             try:
                 with zipfile.ZipFile(path, 'r') as zf:
                     zf.extractall(tmp)
-                _scan_directory(tmp, images, seen)
+                _scan_directory(tmp, images, seen, temp_dirs)
             except zipfile.BadZipFile:
                 continue
 
@@ -111,8 +119,9 @@ def collect_images(paths: List[str]) -> Tuple[List[str], List[str]]:
     return images, temp_dirs
 
 
-def _scan_directory(directory: str, images: List[str], seen: Set[str]):
-    """Recursively find all supported image files in a directory."""
+def _scan_directory(directory: str, images: List[str], seen: Set[str],
+                    temp_dirs: List[str] | None = None):
+    """Recursively find all supported image files (and ZIPs) in a directory."""
     for root, _, files in os.walk(directory):
         for f in files:
             fp = os.path.join(root, f)
@@ -120,6 +129,17 @@ def _scan_directory(directory: str, images: List[str], seen: Set[str]):
             if ext in SUPPORTED_EXTENSIONS and fp not in seen:
                 images.append(fp)
                 seen.add(fp)
+            elif ext == '.zip' and fp not in seen and temp_dirs is not None:
+                seen.add(fp)
+                try:
+                    if zipfile.is_zipfile(fp):
+                        tmp = tempfile.mkdtemp(prefix="imgupscaler_")
+                        temp_dirs.append(tmp)
+                        with zipfile.ZipFile(fp, 'r') as zf:
+                            zf.extractall(tmp)
+                        _scan_directory(tmp, images, seen, temp_dirs)
+                except Exception:
+                    pass
 
 
 def process_image(img: Image.Image, settings: ProcessingSettings) -> Image.Image:
@@ -152,7 +172,26 @@ def process_image(img: Image.Image, settings: ProcessingSettings) -> Image.Image
         new_h = max(1, int(img.height * settings.downscale_factor))
         img = img.resize((new_w, new_h), Image.LANCZOS)
 
-    # Pass 5: Erode outer pixels of visible (non-transparent) content
+    # Pass 5: Contrast adjustment
+    if settings.contrast != 1.0:
+        img = ImageEnhance.Contrast(img).enhance(settings.contrast)
+
+    # Pass 6: Saturation adjustment
+    if settings.saturation != 1.0:
+        img = ImageEnhance.Color(img).enhance(settings.saturation)
+
+    # Pass 7: Brightness adjustment
+    if settings.brightness != 1.0:
+        img = ImageEnhance.Brightness(img).enhance(settings.brightness)
+
+    # Pass 8: Noise reduction / anti-aliasing (median filter)
+    if settings.noise_reduction > 0:
+        # MedianFilter removes noise and softens jagged edges
+        # Kernel size must be odd and >= 3
+        k = settings.noise_reduction * 2 + 1  # 1->3, 2->5, 3->7 ...
+        img = img.filter(ImageFilter.MedianFilter(size=k))
+
+    # Pass 9: Erode outer pixels of visible (non-transparent) content
     if settings.edge_trim > 0 and img.mode == 'RGBA':
         alpha = img.getchannel('A')
         # Erode alpha: repeatedly apply a MinFilter to shrink opaque area

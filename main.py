@@ -8,7 +8,7 @@ Export all processed images to a destination folder.
 """
 
 import customtkinter as ctk
-from tkinter import filedialog, messagebox, Canvas
+from tkinter import filedialog, messagebox, Canvas, ttk
 from PIL import Image, ImageTk, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 import os
 import queue
@@ -43,13 +43,17 @@ DANGER = ("#D03B3B", "#A51F1F")
 # Quality presets: (upscale, blur, sharpen_r, sharpen_amt, sharpen_thr, downscale)
 PRESETS = {
     "Low":    ProcessingSettings(upscale_factor=2, blur_radius=0.3, sharpen_radius=0.8,
-                                 sharpen_amount=60,  sharpen_threshold=3, downscale_factor=1.00, edge_trim=0),
+                                 sharpen_amount=60,  sharpen_threshold=3, downscale_factor=1.00,
+                                 edge_trim=0, contrast=1.0, saturation=1.0, brightness=1.0, noise_reduction=0),
     "Medium": ProcessingSettings(upscale_factor=4, blur_radius=0.6, sharpen_radius=1.2,
-                                 sharpen_amount=120, sharpen_threshold=2, downscale_factor=0.97, edge_trim=0),
+                                 sharpen_amount=120, sharpen_threshold=2, downscale_factor=0.97,
+                                 edge_trim=0, contrast=1.05, saturation=1.05, brightness=1.0, noise_reduction=0),
     "High":   ProcessingSettings(upscale_factor=4, blur_radius=0.4, sharpen_radius=1.5,
-                                 sharpen_amount=180, sharpen_threshold=1, downscale_factor=0.98, edge_trim=0),
+                                 sharpen_amount=180, sharpen_threshold=1, downscale_factor=0.98,
+                                 edge_trim=0, contrast=1.1, saturation=1.1, brightness=1.0, noise_reduction=1),
     "Ultra":  ProcessingSettings(upscale_factor=8, blur_radius=0.5, sharpen_radius=2.0,
-                                 sharpen_amount=220, sharpen_threshold=1, downscale_factor=0.97, edge_trim=0),
+                                 sharpen_amount=220, sharpen_threshold=1, downscale_factor=0.97,
+                                 edge_trim=0, contrast=1.15, saturation=1.15, brightness=1.0, noise_reduction=1),
 }
 
 
@@ -147,6 +151,26 @@ class App(ctk.CTk):
         self._setup_dnd()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # Set initial sash positions after the window has rendered
+        self.after(100, self._set_initial_sash_positions)
+
+    def _set_initial_sash_positions(self):
+        """Place sashes so left panel is 330px and settings gets ~55% of vertical space."""
+        self.update_idletasks()
+        try:
+            self._h_pane.sashpos(0, 330)
+        except Exception:
+            pass
+        try:
+            h = self._v_pane.winfo_height()
+            if h > 10:
+                self._v_pane.sashpos(0, max(220, int(h * 0.55)))
+            else:
+                # Window not mapped yet, retry
+                self.after(200, self._set_initial_sash_positions)
+        except Exception:
+            pass
+
     # ═══════════════════════════════════════════════════════════════════
     # UI CONSTRUCTION
     # ═══════════════════════════════════════════════════════════════════
@@ -184,20 +208,31 @@ class App(ctk.CTk):
             pass  # graceful fallback — default icon is fine
 
     def _build_ui(self):
-        self.grid_columnconfigure(0, weight=0, minsize=330)
-        self.grid_columnconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=0)
 
-        self._build_left_panel()
-        self._build_right_panel()
+        # Style for ttk PanedWindows
+        style = ttk.Style(self)
+        style.configure("Dark.TPanedwindow", background="#2b2b2b")
+        # Make the sash handle easier to grab
+        style.configure("Sash", sashthickness=6, handlesize=10)
+
+        # Horizontal PanedWindow: left panel | right panel
+        self._h_pane = ttk.PanedWindow(
+            self, orient="horizontal", style="Dark.TPanedwindow",
+        )
+        self._h_pane.grid(row=0, column=0, sticky="nsew")
+
+        self._build_left_panel(self._h_pane)
+        self._build_right_panel(self._h_pane)
         self._build_bottom_bar()
 
     # ── Left panel: inputs ────────────────────────────────────────────
 
-    def _build_left_panel(self):
-        left = ctk.CTkFrame(self, corner_radius=0)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0, 2))
+    def _build_left_panel(self, pane):
+        left = ctk.CTkFrame(pane, corner_radius=0)
+        pane.add(left, weight=0)
         left.grid_rowconfigure(3, weight=1)
         left.grid_columnconfigure(0, weight=1)
 
@@ -261,28 +296,38 @@ class App(ctk.CTk):
 
     # ── Right panel: settings + preview ───────────────────────────────
 
-    def _build_right_panel(self):
-        right = ctk.CTkFrame(self, corner_radius=0, fg_color="transparent")
-        right.grid(row=0, column=1, sticky="nsew")
-        right.grid_rowconfigure(1, weight=1)
+    def _build_right_panel(self, pane):
+        right = ctk.CTkFrame(pane, corner_radius=0, fg_color="transparent")
+        pane.add(right, weight=1)
+        right.grid_rowconfigure(0, weight=1)
         right.grid_columnconfigure(0, weight=1)
 
-        self._build_settings(right)
-        self._build_preview(right)
+        # Vertical PanedWindow: settings (top) | preview (bottom)
+        self._v_pane = ttk.PanedWindow(
+            right, orient="vertical", style="Dark.TPanedwindow",
+        )
+        self._v_pane.grid(row=0, column=0, sticky="nsew")
+
+        self._build_settings(self._v_pane)
+        self._build_preview(self._v_pane)
 
     def _build_settings(self, parent):
-        sf = ctk.CTkFrame(parent)
-        sf.grid(row=0, column=0, padx=10, pady=(10, 5), sticky="ew")
-        sf.grid_columnconfigure(1, weight=1)
+        # Outer wrapper so the PanedWindow can manage it
+        settings_wrapper = ctk.CTkFrame(parent, corner_radius=0)
+        settings_wrapper.configure(height=350)  # ensure it requests enough space
+        settings_wrapper.grid_propagate(True)
+        parent.add(settings_wrapper, weight=1)
+        settings_wrapper.grid_rowconfigure(0, weight=1)
+        settings_wrapper.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(
-            sf, text="  Processing Settings",
-            font=ctk.CTkFont(size=16, weight="bold"),
-        ).grid(row=0, column=0, columnspan=4, padx=15, pady=(12, 6), sticky="w")
+        # Scrollable container for all settings
+        sf = ctk.CTkScrollableFrame(settings_wrapper, label_text="Processing Settings")
+        sf.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
+        sf.grid_columnconfigure(1, weight=1)
 
         # Preset selector row
         preset_row = ctk.CTkFrame(sf, fg_color="transparent")
-        preset_row.grid(row=1, column=0, columnspan=4, padx=15, pady=(2, 6), sticky="ew")
+        preset_row.grid(row=1, column=0, columnspan=4, padx=10, pady=(2, 6), sticky="ew")
 
         ctk.CTkLabel(preset_row, text="Preset:", font=ctk.CTkFont(size=13)).pack(
             side="left", padx=(0, 8),
@@ -302,6 +347,10 @@ class App(ctk.CTk):
             ("Sharpen Amount",    "sharpen_amount",    0,    300,  120,  5,    "{}%",    int),
             ("Sharpen Threshold", "sharpen_threshold", 0,    10,   2,    1,    "{}",     int),
             ("Downscale Factor",  "downscale_factor",  0.80, 1.00, 0.97, 0.01, "{:.2f}", float),
+            ("Contrast",          "contrast",          0.50, 2.00, 1.0,  0.05, "{:.2f}", float),
+            ("Saturation",        "saturation",        0.00, 2.00, 1.0,  0.05, "{:.2f}", float),
+            ("Brightness",        "brightness",        0.50, 2.00, 1.0,  0.05, "{:.2f}", float),
+            ("Noise Reduction",   "noise_reduction",   0,    5,    0,    1,    "{}",     int),
             ("Edge Trim (px)",    "edge_trim",         0,    50,   0,    1,    "{}px",   int),
         ]
 
@@ -310,32 +359,32 @@ class App(ctk.CTk):
         self._slider_val_labels: dict = {}
 
         for i, (label, attr, lo, hi, default, step, fmt, vtype) in enumerate(configs, start=2):
-            ctk.CTkLabel(sf, text=label, font=ctk.CTkFont(size=13)).grid(
-                row=i, column=0, padx=(15, 10), pady=4, sticky="w",
+            ctk.CTkLabel(sf, text=label, font=ctk.CTkFont(size=12)).grid(
+                row=i, column=0, padx=(10, 6), pady=2, sticky="w",
             )
 
             val_label = ctk.CTkLabel(
-                sf, text=fmt.format(default), width=60,
-                font=ctk.CTkFont(size=13, weight="bold"),
+                sf, text=fmt.format(default), width=50,
+                font=ctk.CTkFont(size=12, weight="bold"),
             )
-            val_label.grid(row=i, column=2, padx=(4, 0), pady=4, sticky="e")
+            val_label.grid(row=i, column=2, padx=(2, 0), pady=2, sticky="e")
 
             n_steps = max(1, int(round((hi - lo) / step)))
             slider = ctk.CTkSlider(
-                sf, from_=lo, to=hi, number_of_steps=n_steps,
+                sf, from_=lo, to=hi, number_of_steps=n_steps, height=14,
                 command=lambda v, a=attr, vl=val_label, f=fmt, s=step, t=vtype:
                     self._on_slider_change(v, a, vl, f, s, t),
             )
             slider.set(default)
-            slider.grid(row=i, column=1, padx=5, pady=4, sticky="ew")
+            slider.grid(row=i, column=1, padx=4, pady=2, sticky="ew")
 
             # +/- buttons
             btn_frame = ctk.CTkFrame(sf, fg_color="transparent")
-            btn_frame.grid(row=i, column=3, padx=(2, 10), pady=4, sticky="e")
+            btn_frame.grid(row=i, column=3, padx=(2, 6), pady=2, sticky="e")
 
             minus_btn = ctk.CTkButton(
-                btn_frame, text="\u2212", width=24, height=24,
-                font=ctk.CTkFont(size=14, weight="bold"),
+                btn_frame, text="\u2212", width=22, height=22,
+                font=ctk.CTkFont(size=13, weight="bold"),
                 fg_color=("gray75", "gray30"), hover_color=("gray65", "gray40"),
                 corner_radius=4,
                 command=lambda a=attr, s=step, l=lo, h=hi: self._step_slider(a, -s, l, h),
@@ -343,8 +392,8 @@ class App(ctk.CTk):
             minus_btn.pack(side="left", padx=(0, 2))
 
             plus_btn = ctk.CTkButton(
-                btn_frame, text="+", width=24, height=24,
-                font=ctk.CTkFont(size=14, weight="bold"),
+                btn_frame, text="+", width=22, height=22,
+                font=ctk.CTkFont(size=13, weight="bold"),
                 fg_color=("gray75", "gray30"), hover_color=("gray65", "gray40"),
                 corner_radius=4,
                 command=lambda a=attr, s=step, l=lo, h=hi: self._step_slider(a, s, l, h),
@@ -357,14 +406,14 @@ class App(ctk.CTk):
         # Reset to defaults button
         reset_row = len(configs) + 2
         ctk.CTkButton(
-            sf, text="Reset to Defaults", height=28,
+            sf, text="Reset to Defaults", height=26,
             fg_color=("gray75", "gray30"), hover_color=("gray65", "gray40"),
             font=ctk.CTkFont(size=12), command=self._reset_settings,
-        ).grid(row=reset_row, column=0, columnspan=4, padx=15, pady=(6, 10), sticky="ew")
+        ).grid(row=reset_row, column=0, columnspan=4, padx=10, pady=(4, 6), sticky="ew")
 
     def _build_preview(self, parent):
-        pf = ctk.CTkFrame(parent)
-        pf.grid(row=1, column=0, padx=10, pady=(5, 10), sticky="nsew")
+        pf = ctk.CTkFrame(parent, corner_radius=0)
+        parent.add(pf, weight=1)
         pf.grid_rowconfigure(1, weight=1)
         pf.grid_columnconfigure(0, weight=1)
 
@@ -433,7 +482,7 @@ class App(ctk.CTk):
 
     def _build_bottom_bar(self):
         bar = ctk.CTkFrame(self, corner_radius=0)
-        bar.grid(row=1, column=0, columnspan=2, sticky="ew")
+        bar.grid(row=1, column=0, sticky="ew")
 
         # --- left: format / quality ---
         left_sec = ctk.CTkFrame(bar, fg_color="transparent")
@@ -661,6 +710,13 @@ class App(ctk.CTk):
                 self._schedule_preview_update()
                 break
 
+    def _select_preview(self, idx):
+        """Select a file from the list by index and show it in preview."""
+        if 0 <= idx < len(self.image_infos):
+            self.preview_index = idx
+            self.preview_selector.set(self.image_infos[idx].filename)
+            self._schedule_preview_update()
+
     def _on_preview_canvas_resize(self, _event=None):
         """Re-draw checkerboard, re-center placeholder, re-render preview."""
         cw = self.preview_canvas.winfo_width()
@@ -853,9 +909,11 @@ class App(ctk.CTk):
             row.grid_columnconfigure(0, weight=1)
 
             name = info.filename if len(info.filename) <= 28 else info.filename[:25] + "..."
-            ctk.CTkLabel(row, text=name, font=ctk.CTkFont(size=12), anchor="w").grid(
-                row=0, column=0, sticky="w",
-            )
+            lbl = ctk.CTkLabel(row, text=name, font=ctk.CTkFont(size=12), anchor="w")
+            lbl.grid(row=0, column=0, sticky="w")
+            # Double-click to show in preview
+            lbl.bind("<Double-Button-1>", lambda _e, idx=i: self._select_preview(idx))
+            row.bind("<Double-Button-1>", lambda _e, idx=i: self._select_preview(idx))
             ctk.CTkLabel(
                 row, text=f"{info.width}x{info.height}",
                 font=ctk.CTkFont(size=11), text_color=("gray50", "gray55"),
@@ -1112,7 +1170,22 @@ class App(ctk.CTk):
         if not dest:
             return
 
-        output_dir = os.path.join(dest, "upscaled_output")
+        # Ask for output folder name
+        from tkinter import simpledialog
+        folder_name = simpledialog.askstring(
+            "Folder Name",
+            "Enter a name for the output folder:",
+            initialvalue="upscaled_output",
+            parent=self,
+        )
+        if not folder_name:
+            return
+        # Sanitise folder name
+        folder_name = folder_name.strip().replace('\\', '_').replace('/', '_')
+        if not folder_name:
+            folder_name = "upscaled_output"
+
+        output_dir = os.path.join(dest, folder_name)
         os.makedirs(output_dir, exist_ok=True)
 
         self.export_cancelled = False
@@ -1151,13 +1224,15 @@ class App(ctk.CTk):
 
                 base = os.path.splitext(info.filename)[0]
                 out_name = base + out_ext
+                out_path = os.path.join(output_dir, out_name)
                 n = 1
-                while out_name in used_names:
-                    out_name = f"{base}_{n}{out_ext}"
+                while out_name in used_names or os.path.exists(out_path):
+                    out_name = f"{base} ({n}){out_ext}"
+                    out_path = os.path.join(output_dir, out_name)
                     n += 1
                 used_names.add(out_name)
 
-                save_image(processed, os.path.join(output_dir, out_name), settings)
+                save_image(processed, out_path, settings)
                 ok += 1
             except Exception:
                 fail += 1
