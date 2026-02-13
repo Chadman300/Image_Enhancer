@@ -9,7 +9,7 @@ Export all processed images to a destination folder.
 
 import customtkinter as ctk
 from tkinter import filedialog, messagebox, Canvas
-from PIL import Image, ImageTk, ImageDraw, ImageFont
+from PIL import Image, ImageTk, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 import os
 import queue
 import threading
@@ -40,58 +40,65 @@ ctk.set_default_color_theme("blue")
 ACCENT = ("#3B8ED0", "#1F6AA5")
 DANGER = ("#D03B3B", "#A51F1F")
 
+# Quality presets: (upscale, blur, sharpen_r, sharpen_amt, sharpen_thr, downscale)
+PRESETS = {
+    "Low":    ProcessingSettings(upscale_factor=2, blur_radius=0.3, sharpen_radius=0.8,
+                                 sharpen_amount=60,  sharpen_threshold=3, downscale_factor=1.00, edge_trim=0),
+    "Medium": ProcessingSettings(upscale_factor=4, blur_radius=0.6, sharpen_radius=1.2,
+                                 sharpen_amount=120, sharpen_threshold=2, downscale_factor=0.97, edge_trim=0),
+    "High":   ProcessingSettings(upscale_factor=4, blur_radius=0.4, sharpen_radius=1.5,
+                                 sharpen_amount=180, sharpen_threshold=1, downscale_factor=0.98, edge_trim=0),
+    "Ultra":  ProcessingSettings(upscale_factor=8, blur_radius=0.5, sharpen_radius=2.0,
+                                 sharpen_amount=220, sharpen_threshold=1, downscale_factor=0.97, edge_trim=0),
+}
+
 
 def _generate_app_icon() -> Image.Image:
-    """Create a 256x256 app icon programmatically."""
+    """Create a 256x256 blue-square app icon programmatically."""
     size = 256
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # Rounded-rect background gradient (dark blue-gray)
-    pad = 16
-    r = 48
-    # Base rounded rect — dark charcoal
+    # Solid blue rounded-square background
+    pad = 12
+    r = 44
     draw.rounded_rectangle(
         [pad, pad, size - pad, size - pad],
-        radius=r, fill=(30, 34, 42, 255),
+        radius=r, fill=(41, 121, 204, 255),   # nice medium blue
     )
-    # Inner highlight rect
+    # Subtle lighter inner highlight
     draw.rounded_rectangle(
-        [pad + 4, pad + 4, size - pad - 4, size - pad - 4],
-        radius=r - 4, fill=(38, 44, 56, 255),
+        [pad + 3, pad + 3, size - pad - 3, size - pad - 3],
+        radius=r - 3, fill=(50, 132, 217, 255),
     )
 
-    # Upward arrow (representing upscale)
-    cx, cy = size // 2, size // 2 - 10
-    arrow_color = (59, 142, 208, 255)  # accent blue
+    # White upward arrow (representing upscale)
+    cx, cy = size // 2, size // 2 - 6
+    white = (255, 255, 255, 255)
 
     # Arrow shaft
-    shaft_w = 18
+    shaft_w = 22
     draw.rectangle(
-        [cx - shaft_w // 2, cy, cx + shaft_w // 2, cy + 70],
-        fill=arrow_color,
+        [cx - shaft_w // 2, cy + 2, cx + shaft_w // 2, cy + 72],
+        fill=white,
     )
     # Arrow head (triangle)
     draw.polygon(
-        [(cx, cy - 45), (cx - 40, cy + 5), (cx + 40, cy + 5)],
-        fill=arrow_color,
+        [(cx, cy - 48), (cx - 44, cy + 8), (cx + 44, cy + 8)],
+        fill=white,
     )
 
-    # Small pixel-grid squares at the bottom to hint "image"
-    sq = 16
-    gap = 4
+    # Small pixel-grid at the bottom — white with slight transparency
+    sq = 14
+    gap = 5
     start_x = cx - (sq * 3 + gap * 2) // 2
-    start_y = cy + 78
-    colors = [
-        (100, 200, 130, 255), (200, 160, 80, 255), (180, 100, 180, 255),
-        (80, 160, 210, 255), (210, 100, 100, 255), (120, 120, 200, 255),
-    ]
+    start_y = cy + 82
+    grid_fill = (255, 255, 255, 180)
     for row in range(2):
         for col in range(3):
             x = start_x + col * (sq + gap)
             y = start_y + row * (sq + gap)
-            c = colors[row * 3 + col]
-            draw.rectangle([x, y, x + sq, y + sq], fill=c)
+            draw.rectangle([x, y, x + sq, y + sq], fill=grid_fill)
 
     return img
 
@@ -116,6 +123,7 @@ class App(ctk.CTk):
         # ── state ──
         self.image_infos: list[ImageInfo] = []
         self.settings = ProcessingSettings()
+        self._custom_settings = self.settings.copy()  # remember user's custom values
         self.preview_index: int = 0
         self._preview_timer_id: Optional[str] = None
         self._preview_pil: Optional[Image.Image] = None   # processed PIL image
@@ -130,6 +138,10 @@ class App(ctk.CTk):
         self._pan_y: float = 0.0
         self._drag_start: Optional[tuple] = None
 
+        # Loading overlay state
+        self._loading_blur_photo = None
+        self._loading_overlay_active = False
+
         # ── build ──
         self._build_ui()
         self._setup_dnd()
@@ -143,18 +155,22 @@ class App(ctk.CTk):
         """Generate and apply the custom app icon (title bar + taskbar)."""
         try:
             icon = _generate_app_icon()
-            # Save a temporary .ico for Windows taskbar
-            import tempfile, ctypes
+            import ctypes
+
+            # Save .ico — use PyInstaller's temp dir if bundled, else script dir
+            base_dir = getattr(sys, '_MEIPASS', os.path.dirname(__file__))
+            ico_path = os.path.join(base_dir, "icon.ico")
+            if not os.path.exists(ico_path):
+                icon.save(
+                    ico_path, format="ICO",
+                    sizes=[(256, 256), (48, 48), (32, 32), (16, 16)],
+                )
+
+            # Set the icon on the window title-bar
             self._icon_photo = ImageTk.PhotoImage(icon)
             self.iconphoto(True, self._icon_photo)
 
-            # Also set via Windows API so the taskbar icon updates
-            ico_path = os.path.join(tempfile.gettempdir(), "imgupscaler_icon.ico")
-            # .ico needs multiple sizes
-            icon.save(
-                ico_path, format="ICO",
-                sizes=[(256, 256), (48, 48), (32, 32), (16, 16)],
-            )
+            # Also set via .ico so Windows taskbar picks it up
             self.iconbitmap(ico_path)
 
             # Set AppUserModelID so Windows groups this as its own taskbar entry
@@ -262,7 +278,21 @@ class App(ctk.CTk):
         ctk.CTkLabel(
             sf, text="  Processing Settings",
             font=ctk.CTkFont(size=16, weight="bold"),
-        ).grid(row=0, column=0, columnspan=3, padx=15, pady=(12, 6), sticky="w")
+        ).grid(row=0, column=0, columnspan=4, padx=15, pady=(12, 6), sticky="w")
+
+        # Preset selector row
+        preset_row = ctk.CTkFrame(sf, fg_color="transparent")
+        preset_row.grid(row=1, column=0, columnspan=4, padx=15, pady=(2, 6), sticky="ew")
+
+        ctk.CTkLabel(preset_row, text="Preset:", font=ctk.CTkFont(size=13)).pack(
+            side="left", padx=(0, 8),
+        )
+        self.preset_menu = ctk.CTkComboBox(
+            preset_row, values=["Custom", "Low", "Medium", "High", "Ultra"],
+            width=120, state="readonly", command=self._on_preset_change,
+        )
+        self.preset_menu.set("Custom")
+        self.preset_menu.pack(side="left")
 
         # (label, attr, from, to, default, step, format, type)
         configs = [
@@ -272,13 +302,14 @@ class App(ctk.CTk):
             ("Sharpen Amount",    "sharpen_amount",    0,    300,  120,  5,    "{}%",    int),
             ("Sharpen Threshold", "sharpen_threshold", 0,    10,   2,    1,    "{}",     int),
             ("Downscale Factor",  "downscale_factor",  0.80, 1.00, 0.97, 0.01, "{:.2f}", float),
+            ("Edge Trim (px)",    "edge_trim",         0,    50,   0,    1,    "{}px",   int),
         ]
 
         self._slider_configs = configs
         self._slider_refs: dict = {}
         self._slider_val_labels: dict = {}
 
-        for i, (label, attr, lo, hi, default, step, fmt, vtype) in enumerate(configs, start=1):
+        for i, (label, attr, lo, hi, default, step, fmt, vtype) in enumerate(configs, start=2):
             ctk.CTkLabel(sf, text=label, font=ctk.CTkFont(size=13)).grid(
                 row=i, column=0, padx=(15, 10), pady=4, sticky="w",
             )
@@ -287,7 +318,7 @@ class App(ctk.CTk):
                 sf, text=fmt.format(default), width=60,
                 font=ctk.CTkFont(size=13, weight="bold"),
             )
-            val_label.grid(row=i, column=2, padx=(10, 15), pady=4, sticky="e")
+            val_label.grid(row=i, column=2, padx=(4, 0), pady=4, sticky="e")
 
             n_steps = max(1, int(round((hi - lo) / step)))
             slider = ctk.CTkSlider(
@@ -298,16 +329,38 @@ class App(ctk.CTk):
             slider.set(default)
             slider.grid(row=i, column=1, padx=5, pady=4, sticky="ew")
 
+            # +/- buttons
+            btn_frame = ctk.CTkFrame(sf, fg_color="transparent")
+            btn_frame.grid(row=i, column=3, padx=(2, 10), pady=4, sticky="e")
+
+            minus_btn = ctk.CTkButton(
+                btn_frame, text="\u2212", width=24, height=24,
+                font=ctk.CTkFont(size=14, weight="bold"),
+                fg_color=("gray75", "gray30"), hover_color=("gray65", "gray40"),
+                corner_radius=4,
+                command=lambda a=attr, s=step, l=lo, h=hi: self._step_slider(a, -s, l, h),
+            )
+            minus_btn.pack(side="left", padx=(0, 2))
+
+            plus_btn = ctk.CTkButton(
+                btn_frame, text="+", width=24, height=24,
+                font=ctk.CTkFont(size=14, weight="bold"),
+                fg_color=("gray75", "gray30"), hover_color=("gray65", "gray40"),
+                corner_radius=4,
+                command=lambda a=attr, s=step, l=lo, h=hi: self._step_slider(a, s, l, h),
+            )
+            plus_btn.pack(side="left")
+
             self._slider_refs[attr] = slider
             self._slider_val_labels[attr] = (val_label, fmt, vtype)
 
         # Reset to defaults button
-        reset_row = len(configs) + 1
+        reset_row = len(configs) + 2
         ctk.CTkButton(
             sf, text="Reset to Defaults", height=28,
             fg_color=("gray75", "gray30"), hover_color=("gray65", "gray40"),
             font=ctk.CTkFont(size=12), command=self._reset_settings,
-        ).grid(row=reset_row, column=0, columnspan=3, padx=15, pady=(6, 10), sticky="ew")
+        ).grid(row=reset_row, column=0, columnspan=4, padx=15, pady=(6, 10), sticky="ew")
 
     def _build_preview(self, parent):
         pf = ctk.CTkFrame(parent)
@@ -344,8 +397,10 @@ class App(ctk.CTk):
             fill="#666666", font=("Segoe UI", 12),
         )
 
-        # Checkerboard-style subtle pattern drawn once on first resize
-        self._canvas_bg_drawn = False
+        # Checkerboard background tile (generated once, tiled on resize)
+        self._checker_tile = self._make_checker_tile()
+        self._checker_photo = None  # tiled PhotoImage
+        self._checker_id = None     # canvas item id
 
         # Bind pan & zoom
         self.preview_canvas.bind("<Configure>", self._on_preview_canvas_resize)
@@ -435,6 +490,81 @@ class App(ctk.CTk):
         self.progress_bar.set(0)
 
     # ═══════════════════════════════════════════════════════════════════
+    # CHECKERBOARD BACKGROUND
+    # ═══════════════════════════════════════════════════════════════════
+
+    @staticmethod
+    def _make_checker_tile(tile_size: int = 16) -> Image.Image:
+        """Create a small 2x2-square checkerboard tile (dark grays)."""
+        s = tile_size
+        tile = Image.new("RGB", (s * 2, s * 2))
+        dark = (26, 26, 26)    # #1a1a1a
+        light = (38, 38, 38)   # #262626
+        draw = ImageDraw.Draw(tile)
+        draw.rectangle([0, 0, s - 1, s - 1], fill=dark)
+        draw.rectangle([s, 0, s * 2 - 1, s - 1], fill=light)
+        draw.rectangle([0, s, s - 1, s * 2 - 1], fill=light)
+        draw.rectangle([s, s, s * 2 - 1, s * 2 - 1], fill=dark)
+        return tile
+
+    def _draw_checkerboard(self, cw: int, ch: int):
+        """Tile a zoom-scaled checkerboard across the entire canvas, offset by pan."""
+        base_tile = 16
+        s = max(2, int(base_tile * self._zoom))
+        dark = (26, 26, 26)
+        light = (38, 38, 38)
+
+        # Compute pan offset so the checkerboard moves with the image
+        ox = int(self._pan_x) % (s * 2)
+        oy = int(self._pan_y) % (s * 2)
+
+        bg = Image.new("RGB", (cw, ch), dark)
+        draw = ImageDraw.Draw(bg)
+        for ty in range(-s * 2 + oy, ch, s):
+            for tx in range(-s * 2 + ox, cw, s):
+                # Use the offset-adjusted index for the checker pattern
+                col_idx = (tx - ox) // s
+                row_idx = (ty - oy) // s
+                if (col_idx + row_idx) % 2 == 1:
+                    x0 = max(0, tx)
+                    y0 = max(0, ty)
+                    x1 = min(tx + s - 1, cw - 1)
+                    y1 = min(ty + s - 1, ch - 1)
+                    if x1 >= x0 and y1 >= y0:
+                        draw.rectangle([x0, y0, x1, y1], fill=light)
+        self._checker_photo = ImageTk.PhotoImage(bg)
+        self.preview_canvas.delete("checker")
+        self._checker_id = self.preview_canvas.create_image(
+            0, 0, image=self._checker_photo, anchor="nw", tags="checker",
+        )
+        self.preview_canvas.tag_lower("checker")
+
+    def _composite_checkerboard(self, display: Image.Image) -> Image.Image:
+        """
+        Composite a zoom-scaled checkerboard behind an RGBA image so that
+        only truly transparent pixels reveal the pattern.  Returns an RGB image.
+        """
+        w, h = display.size
+        base_tile_size = 16
+        scaled_tile = max(2, int(base_tile_size * self._zoom))
+
+        dark = (30, 30, 30)
+        light = (50, 50, 50)
+        bg = Image.new("RGB", (w, h), dark)
+        draw = ImageDraw.Draw(bg)
+        for ty in range(0, h, scaled_tile):
+            for tx in range(0, w, scaled_tile):
+                if (tx // scaled_tile + ty // scaled_tile) % 2 == 1:
+                    draw.rectangle(
+                        [tx, ty,
+                         min(tx + scaled_tile - 1, w - 1),
+                         min(ty + scaled_tile - 1, h - 1)],
+                        fill=light,
+                    )
+        bg.paste(display, (0, 0), display)  # alpha-composite
+        return bg
+
+    # ═══════════════════════════════════════════════════════════════════
     # EVENT HANDLERS
     # ═══════════════════════════════════════════════════════════════════
 
@@ -442,11 +572,8 @@ class App(ctk.CTk):
         """Reset all sliders to their default values."""
         defaults = ProcessingSettings()
         self.settings = defaults
-
-        for (_label, attr, _lo, _hi, default, _step, fmt, vtype) in self._slider_configs:
-            self._slider_refs[attr].set(default)
-            val_label, _, _ = self._slider_val_labels[attr]
-            val_label.configure(text=fmt.format(default))
+        self._apply_settings_to_ui(defaults)
+        self.preset_menu.set("Custom")
 
         # Reset format and quality
         self.format_menu.set("PNG")
@@ -458,6 +585,32 @@ class App(ctk.CTk):
 
         self._schedule_preview_update()
 
+    def _on_preset_change(self, value):
+        """Apply a quality preset, or restore saved custom values."""
+        if value == "Custom":
+            # Restore the user's saved custom settings
+            self.settings = self._custom_settings.copy()
+            self._apply_settings_to_ui(self.settings)
+            self._schedule_preview_update()
+            return
+        if value not in PRESETS:
+            return
+        # Save current settings as custom before switching away
+        if self.preset_menu.get() != value:  # switching from something else
+            self._custom_settings = self.settings.copy()
+        preset = PRESETS[value].copy()
+        self.settings = preset
+        self._apply_settings_to_ui(preset)
+        self._schedule_preview_update()
+
+    def _apply_settings_to_ui(self, s: ProcessingSettings):
+        """Sync all slider widgets to match a ProcessingSettings object."""
+        for (_label, attr, _lo, _hi, _default, _step, fmt, vtype) in self._slider_configs:
+            val = getattr(s, attr)
+            self._slider_refs[attr].set(val)
+            val_label, _, _ = self._slider_val_labels[attr]
+            val_label.configure(text=fmt.format(val))
+
     def _on_slider_change(self, value, attr, val_label, fmt, step, vtype):
         if vtype is int:
             value = int(round(value))
@@ -466,6 +619,25 @@ class App(ctk.CTk):
 
         val_label.configure(text=fmt.format(value))
         setattr(self.settings, attr, vtype(value))
+        self.preset_menu.set("Custom")  # manual slider change = custom
+        self._custom_settings = self.settings.copy()  # save custom values
+        self._schedule_preview_update()
+
+    def _step_slider(self, attr: str, delta: float, lo: float, hi: float):
+        """Nudge a slider by one step (+/-)."""
+        slider = self._slider_refs[attr]
+        val_label, fmt, vtype = self._slider_val_labels[attr]
+        current = slider.get()
+        new_val = max(lo, min(hi, current + delta))
+        if vtype is int:
+            new_val = int(round(new_val))
+        else:
+            new_val = round(new_val, 4)
+        slider.set(new_val)
+        val_label.configure(text=fmt.format(new_val))
+        setattr(self.settings, attr, vtype(new_val))
+        self.preset_menu.set("Custom")
+        self._custom_settings = self.settings.copy()  # save custom values
         self._schedule_preview_update()
 
     def _on_format_change(self, value):
@@ -490,9 +662,11 @@ class App(ctk.CTk):
                 break
 
     def _on_preview_canvas_resize(self, _event=None):
-        """Re-center placeholder and re-render preview when canvas resizes."""
+        """Re-draw checkerboard, re-center placeholder, re-render preview."""
         cw = self.preview_canvas.winfo_width()
         ch = self.preview_canvas.winfo_height()
+        if cw > 1 and ch > 1:
+            self._draw_checkerboard(cw, ch)
         self.preview_canvas.coords(self._preview_placeholder_id, cw // 2, ch // 2)
         if self._preview_pil is not None:
             self._render_canvas()
@@ -500,21 +674,25 @@ class App(ctk.CTk):
     # ── Zoom & Pan ────────────────────────────────────────────────────
 
     def _on_zoom(self, event):
-        if self._preview_pil is None:
+        if self._preview_pil is None or self._loading_overlay_active:
             return
         # Determine scroll direction
         if event.num == 5 or event.delta < 0:
             factor = 0.9
         else:
             factor = 1.1
-        self._zoom = max(0.1, min(20.0, self._zoom * factor))
-        self._render_canvas()
+        new_zoom = max(0.1, min(20.0, self._zoom * factor))
+        if new_zoom != self._zoom:
+            self._zoom = new_zoom
+            self._render_canvas()
 
     def _on_pan_start(self, event):
+        if self._loading_overlay_active:
+            return
         self._drag_start = (event.x, event.y)
 
     def _on_pan_move(self, event):
-        if self._drag_start is None:
+        if self._drag_start is None or self._loading_overlay_active:
             return
         dx = event.x - self._drag_start[0]
         dy = event.y - self._drag_start[1]
@@ -529,6 +707,8 @@ class App(ctk.CTk):
 
     def _on_reset_view(self, _event=None):
         """Double-click resets zoom and pan to fit."""
+        if self._loading_overlay_active:
+            return
         self._zoom = 1.0
         self._pan_x = 0.0
         self._pan_y = 0.0
@@ -600,6 +780,9 @@ class App(ctk.CTk):
 
     def _add_paths(self, paths: list[str]):
         self.progress_label.configure(text="Scanning...")
+        self.progress_bar.set(0)
+        self.progress_bar.configure(mode="indeterminate")
+        self.progress_bar.start()
         self.update_idletasks()
 
         new_paths, temp_dirs = collect_images(paths)
@@ -607,8 +790,9 @@ class App(ctk.CTk):
 
         existing = {info.path for info in self.image_infos}
         added = 0
+        total_new = len(new_paths)
 
-        for p in new_paths:
+        for idx, p in enumerate(new_paths):
             if p in existing:
                 continue
             try:
@@ -618,7 +802,16 @@ class App(ctk.CTk):
                 added += 1
             except Exception:
                 continue
+            # Update progress periodically
+            if added % 10 == 0:
+                self.progress_label.configure(
+                    text=f"Loading {idx + 1}/{total_new}..."
+                )
+                self.update_idletasks()
 
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate")
+        self.progress_bar.set(0)
         self._refresh_file_list()
         self.progress_label.configure(text=f"Added {added} image(s)")
 
@@ -706,10 +899,9 @@ class App(ctk.CTk):
         info = self.image_infos[idx]
         settings = self.settings.copy()
 
-        self.preview_canvas.itemconfigure(
-            self._preview_placeholder_id,
-            state="normal", text="Processing preview...",
-        )
+        # Show blurred loading overlay on top of everything
+        self._show_loading_overlay()
+
         threading.Thread(
             target=self._bg_process_preview, args=(info, settings), daemon=True,
         ).start()
@@ -754,6 +946,7 @@ class App(ctk.CTk):
         self._pan_x = 0.0
         self._pan_y = 0.0
         self._render_canvas()
+        self._clear_loading_overlay()
 
         self.preview_dims_label.configure(
             text=f"Original: {orig_size[0]}x{orig_size[1]}  ->  Output: {out_size[0]}x{out_size[1]}",
@@ -776,7 +969,18 @@ class App(ctk.CTk):
         disp_w = max(1, int(iw * scale))
         disp_h = max(1, int(ih * scale))
 
-        display = self._preview_pil.resize((disp_w, disp_h), Image.LANCZOS)
+        # Cap display pixels to prevent lag at high zoom
+        MAX_DISPLAY_PIXELS = 4_000_000  # ~2000x2000
+        pixel_count = disp_w * disp_h
+        if pixel_count > MAX_DISPLAY_PIXELS:
+            shrink = (MAX_DISPLAY_PIXELS / pixel_count) ** 0.5
+            disp_w = max(1, int(disp_w * shrink))
+            disp_h = max(1, int(disp_h * shrink))
+
+        # Use NEAREST for fast zooming when heavily zoomed in, LANCZOS for quality at normal zoom
+        resample = Image.NEAREST if self._zoom > 3.0 else Image.LANCZOS
+        display = self._preview_pil.resize((disp_w, disp_h), resample)
+
         photo = ImageTk.PhotoImage(display)
         self._preview_photo = photo  # prevent GC
 
@@ -785,13 +989,111 @@ class App(ctk.CTk):
         cy = ch // 2 + int(self._pan_y)
 
         self.preview_canvas.delete("preview")
+
+        # Redraw full-canvas checkerboard at current zoom scale
+        self._draw_checkerboard(cw, ch)
+
         self.preview_canvas.create_image(cx, cy, image=photo, anchor="center", tags="preview")
         self.preview_canvas.itemconfigure(self._preview_placeholder_id, state="hidden")
+
+    # ── Loading overlay ───────────────────────────────────────────────
+
+    def _show_loading_overlay(self):
+        """Capture the current canvas, blur it, and overlay with loading text."""
+        cw = max(1, self.preview_canvas.winfo_width())
+        ch = max(1, self.preview_canvas.winfo_height())
+
+        # Build a snapshot of what's currently on the canvas
+        # Start with the dark background
+        snap = Image.new("RGB", (cw, ch), (26, 26, 26))
+
+        # Paste the checkerboard if it exists
+        if self._checker_photo is not None:
+            try:
+                # Re-create checker at current size
+                base_tile = 16
+                s = max(2, int(base_tile * self._zoom))
+                dark = (26, 26, 26)
+                light = (38, 38, 38)
+                ox = int(self._pan_x) % (s * 2)
+                oy = int(self._pan_y) % (s * 2)
+                draw = ImageDraw.Draw(snap)
+                for ty in range(-s * 2 + oy, ch, s):
+                    for tx in range(-s * 2 + ox, cw, s):
+                        col_idx = (tx - ox) // s
+                        row_idx = (ty - oy) // s
+                        if (col_idx + row_idx) % 2 == 1:
+                            x0, y0 = max(0, tx), max(0, ty)
+                            x1, y1 = min(tx + s - 1, cw - 1), min(ty + s - 1, ch - 1)
+                            if x1 >= x0 and y1 >= y0:
+                                draw.rectangle([x0, y0, x1, y1], fill=light)
+            except Exception:
+                pass
+
+        # Paste the current preview image if present
+        if self._preview_pil is not None and self._preview_photo is not None:
+            try:
+                iw, ih = self._preview_pil.size
+                base_scale = min(cw / iw, ch / ih, 1.0)
+                scale = base_scale * self._zoom
+                disp_w = max(1, int(iw * scale))
+                disp_h = max(1, int(ih * scale))
+                display = self._preview_pil.resize((disp_w, disp_h), Image.NEAREST)
+                cx = cw // 2 + int(self._pan_x)
+                cy = ch // 2 + int(self._pan_y)
+                paste_x = cx - disp_w // 2
+                paste_y = cy - disp_h // 2
+                if display.mode == "RGBA":
+                    snap.paste(display, (paste_x, paste_y), display)
+                else:
+                    snap.paste(display, (paste_x, paste_y))
+            except Exception:
+                pass
+
+        # Blur the snapshot slightly
+        blurred = snap.filter(ImageFilter.GaussianBlur(radius=4))
+        blurred = ImageEnhance.Brightness(blurred).enhance(0.95)
+
+        # Draw loading text onto the blurred image
+        draw = ImageDraw.Draw(blurred)
+        text = "Processing preview..."
+        try:
+            font = ImageFont.truetype("segoeui.ttf", 18)
+        except Exception:
+            font = ImageFont.load_default()
+        bbox = draw.textbbox((0, 0), text, font=font)
+        tw = bbox[2] - bbox[0]
+        th = bbox[3] - bbox[1]
+        tx = (cw - tw) // 2
+        ty = (ch - th) // 2
+        # Text background pill
+        pad = 12
+        draw.rounded_rectangle(
+            [tx - pad * 2, ty - pad, tx + tw + pad * 2, ty + th + pad],
+            radius=10, fill=(40, 40, 40, 220),
+        )
+        draw.text((tx, ty), text, fill=(255, 255, 255), font=font)
+
+        self._loading_blur_photo = ImageTk.PhotoImage(blurred)
+        self.preview_canvas.delete("loading")
+        self.preview_canvas.create_image(
+            0, 0, image=self._loading_blur_photo, anchor="nw", tags="loading",
+        )
+        # Ensure loading overlay is on top of everything
+        self.preview_canvas.tag_raise("loading")
+        self._loading_overlay_active = True
+
+    def _clear_loading_overlay(self):
+        """Remove the loading overlay."""
+        self.preview_canvas.delete("loading")
+        self._loading_blur_photo = None
+        self._loading_overlay_active = False
 
     def _preview_error(self, msg: str):
         self._preview_pil = None
         self._preview_photo = None
         self.preview_canvas.delete("preview")
+        self._clear_loading_overlay()
         self.preview_canvas.itemconfigure(self._preview_placeholder_id, state="normal")
         self.preview_canvas.itemconfigure(
             self._preview_placeholder_id, text=f"Error: {msg}",

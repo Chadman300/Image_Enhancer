@@ -34,6 +34,7 @@ class ProcessingSettings:
     sharpen_amount: int = 120
     sharpen_threshold: int = 2
     downscale_factor: float = 0.97
+    edge_trim: int = 0          # pixels to crop from each edge
     output_format: str = 'PNG'
     jpeg_quality: int = 95
 
@@ -45,6 +46,7 @@ class ProcessingSettings:
             sharpen_amount=self.sharpen_amount,
             sharpen_threshold=self.sharpen_threshold,
             downscale_factor=self.downscale_factor,
+            edge_trim=self.edge_trim,
             output_format=self.output_format,
             jpeg_quality=self.jpeg_quality,
         )
@@ -150,6 +152,16 @@ def process_image(img: Image.Image, settings: ProcessingSettings) -> Image.Image
         new_h = max(1, int(img.height * settings.downscale_factor))
         img = img.resize((new_w, new_h), Image.LANCZOS)
 
+    # Pass 5: Erode outer pixels of visible (non-transparent) content
+    if settings.edge_trim > 0 and img.mode == 'RGBA':
+        alpha = img.getchannel('A')
+        # Erode alpha: repeatedly apply a MinFilter to shrink opaque area
+        # Each MinFilter(3) pass erodes ~1 pixel from each edge
+        eroded = alpha
+        for _ in range(settings.edge_trim):
+            eroded = eroded.filter(ImageFilter.MinFilter(3))
+        img.putalpha(eroded)
+
     return img
 
 
@@ -162,6 +174,7 @@ def get_output_dimensions(
     if settings.downscale_factor < 1.0:
         w = max(1, int(w * settings.downscale_factor))
         h = max(1, int(h * settings.downscale_factor))
+    # edge_trim erodes alpha but doesn't change image dimensions
     return w, h
 
 
